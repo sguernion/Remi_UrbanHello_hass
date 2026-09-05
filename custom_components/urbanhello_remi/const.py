@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.util import slugify
 
 DOMAIN = "urbanhello_remi"
 MANUFACTURER = "UrbanHello"
@@ -66,3 +67,45 @@ def get_device_info(
             else set()
         ),
     )
+
+
+def build_alarm_key(
+    alarm_object_id: str,
+    alarm_name: str | None,
+    alarms: dict[str, Any],
+) -> str:
+    """Return a stable per-device key identifying an alarm.
+
+    The Parse ``objectId`` of an ``Event`` is regenerated server-side whenever
+    the alarm is edited from the UrbanHello app, so it must not be used as the
+    basis of a unique_id: every edit would otherwise register a brand new set
+    of entities and orphan the previous ones.
+
+    The alarm name is stable across those rotations, so it is preferred. The
+    objectId is only kept as a fallback when the name is empty or shared by
+    several alarms of the same device, which keeps unique_ids collision-free.
+    """
+    slug = slugify(alarm_name or "")
+    if not slug:
+        return alarm_object_id
+
+    same_name = [
+        object_id
+        for object_id, data in alarms.items()
+        if slugify((data or {}).get("name") or "") == slug
+    ]
+    if len(same_name) > 1:
+        return f"{slug}_{alarm_object_id}"
+    return slug
+
+
+def build_alarm_unique_id(
+    device_id: str,
+    alarm_object_id: str,
+    alarm_name: str | None,
+    alarms: dict[str, Any],
+    suffix: str,
+) -> str:
+    """Return the unique_id of an alarm entity."""
+    key = build_alarm_key(alarm_object_id, alarm_name, alarms)
+    return f"{device_id}_alarm_{key}_{suffix}"
