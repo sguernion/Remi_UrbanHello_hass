@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import RemiAPI, RemiAPIAuthError, RemiAPIError
@@ -19,6 +19,7 @@ from .const import (
     SERVICE_SNOOZE_ALARM,
     SERVICE_TRIGGER_ALARM,
     SERVICE_UPDATE_ALARM,
+    build_alarm_key,
 )
 from .coordinator import RemiCoordinator
 
@@ -140,6 +141,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
+    _migrate_alarm_unique_ids(hass, entry, coordinators)
+
     await hass.config_entries.async_forward_entry_setups(
         entry,
         [
@@ -155,6 +158,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     return True
+
+
+def _migrate_alarm_unique_ids(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    coordinators: dict[str, RemiCoordinator],
+) -> None:
+    """Move alarm entities onto stable unique_ids and drop stale duplicates.
+
+    Alarm unique_ids used to embed the Parse objectId of the Event, which the
+    backend regenerates on every edit. Entities created under a previous
+    objectId are re-keyed in place so the user keeps their entity_id, area,
+    custom name and voice exposure; whatever is left over is removed.
+    """
+    registry = er.async_get(hass)
+
+    expected: dict[str, str] = {}
+    covered_devices: set[str] = set()
+
+    for device_id, coordinator in coordinators.items():
+        alarms = (coordinator.data or {}).get("alarms") or {}
+        if not alarms:
+            # Never prune from an empty payload: a transient API failure would
+            # otherwise wipe every alarm entity of that device.
+            continue
+        covered_devices.add(device_id)
+
+        for alarm_object_id, alarm_data in alarms.items():
+            key = build_alarm_key(
+                alarm_object_id, (alarm_data or {}).get("name"), alarms
+            )
+            for suffix in ("time", "enabled"):
+                expected[f"{device_id}_alarm_{key}_{suffix}"] = (
+                    f"{device_id}_alarm_{alarm_object_id}_{suffix}"
+                )
+
+    if not covered_devices:
+        return
+
+    known = {
+        entity.unique_id: entity
+        for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if entity.platform == DOMAIN
+    }
+
+    # 1. Re-key the entity backing a live alarm, preserving its settings.
+    for new_unique_id, legacy_unique_id in expected.items():
+        if new_unique_id == legacy_unique_id or new_unique_id in known:
+            continue
+        entity = known.get(legacy_unique_id)
+        if entity is None:
+            continue
+        _LOGGER.info(
+            "Migrating %s to stable unique_id %s", entity.entity_id, new_unique_id
+        )
+        registry.async_update_entity(entity.entity_id, new_unique_id=new_unique_id)
+        known[new_unique_id] = known.pop(legacy_unique_id)
+
+    # 2. Drop the leftovers from previous objectIds.
+    for unique_id, entity in list(known.items()):
+        if "_alarm_" not in unique_id or unique_id in expected:
+            continue
+        if unique_id.split("_alarm_", 1)[0] not in covered_devices:
+            continue
+        _LOGGER.info(
+            "Removing stale alarm entity %s (unique_id %s)",
+            entity.entity_id,
+            unique_id,
+        )
+        registry.async_remove(entity.entity_id)
 
 
 def async_register_services(

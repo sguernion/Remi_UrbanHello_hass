@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, get_device_info
+from .const import DOMAIN, build_alarm_unique_id, get_device_info
 from .coordinator import RemiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,7 +97,9 @@ class RemiAlarmSwitch(CoordinatorEntity, SwitchEntity):
         alarm_name_slug = alarm_name.lower().replace(" ", "_")
 
         self._attr_name = f"{device_name} {alarm_name}"
-        self._attr_unique_id = f"{device_id}_alarm_{alarm_object_id}_enabled"
+        self._attr_unique_id = build_alarm_unique_id(
+            device_id, alarm_object_id, alarm_name, alarms, "enabled"
+        )
         self._attr_suggested_object_id = f"{device_name.lower()}_{alarm_name_slug}"
 
     @property
